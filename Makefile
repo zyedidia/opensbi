@@ -101,7 +101,7 @@ OBJCOPY		=	llvm-objcopy
 else
 ifdef CROSS_COMPILE
 CC		=	$(CROSS_COMPILE)gcc
-AR		=	$(CROSS_COMPILE)ar
+AR		=	$(CROSS_COMPILE)gcc-ar
 LD		=	$(CROSS_COMPILE)ld
 OBJCOPY		=	$(CROSS_COMPILE)objcopy
 else

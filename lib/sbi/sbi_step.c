@@ -1,4 +1,5 @@
 #include <sbi/sbi_step.h>
+#include <sbi/sbi_hart.h>
 #include <sbi/sbi_ecall.h>
 #include <sbi/sbi_ecall_interface.h>
 #include <sbi/sbi_error.h>
@@ -146,6 +147,16 @@ typedef enum {
     IMM_U,
 } imm_type_t;
 
+typedef enum {
+    EXT_BYTE  = 0b000,
+    EXT_HALF  = 0b001,
+    EXT_WORD  = 0b010,
+	EXT_DWORD = 0b011,
+    EXT_BYTEU = 0b100,
+    EXT_HALFU = 0b101,
+	EXT_WORDU = 0b110,
+} imm_ext_t;
+
 #define OP(x) bits_get(x, 6, 0)
 #define RD(x) bits_get(x, 11, 7)
 #define RS1(x) bits_get(x, 19, 15)
@@ -179,6 +190,81 @@ static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
 	return 0;
 }
 
+typedef struct {
+	char* start;
+	char* end;
+	bool active;
+} dev_region_t;
+
+int n_dev_regions;
+#define MAX_DEV_REGION 10
+dev_region_t dev_regions[MAX_DEV_REGION];
+int dev_active;
+
+dev_region_t text_region;
+
+/* FENCE CHECKER */
+/* static void on_fence_i() { */
+/*  */
+/* } */
+
+static void on_fence_dev() {
+	dev_regions[dev_active].active = false;
+}
+
+/* static void on_fence_vma() { */
+/*  */
+/* } */
+
+static void on_load(char* addr, size_t sz) {
+	for (int i = 0; i < n_dev_regions; i++) {
+		if (i == dev_active && dev_regions[dev_active].active)
+			continue;
+		if (addr >= dev_regions[i].start && addr <= dev_regions[i].end) {
+			if (dev_regions[dev_active].active) {
+				sbi_printf("ERROR: load from inactive device region\n");
+				sbi_hart_hang();
+			}
+			dev_active = i;
+			dev_regions[dev_active].active = true;
+		}
+	}
+}
+
+static void on_store(char* addr, size_t sz) {
+	if (text_region.active && addr >= text_region.start && addr <= text_region.end) {
+		sbi_printf("ERROR: store to text segment\n");
+		sbi_hart_hang();
+	}
+
+	for (int i = 0; i < n_dev_regions; i++) {
+		if (i == dev_active && dev_regions[dev_active].active)
+			continue;
+		if (addr >= dev_regions[i].start && addr <= dev_regions[i].end) {
+			if (dev_regions[dev_active].active) {
+				sbi_printf("ERROR: store to inactive device region\n");
+				sbi_hart_hang();
+			}
+			dev_active = i;
+			dev_regions[dev_active].active = true;
+		}
+	}
+}
+
+/* static void on_execute(void* addr) { */
+/*  */
+/* } */
+
+static void sbi_ecall_step_devfence_region(void* start, void* end) {
+	if (n_dev_regions >= MAX_DEV_REGION) {
+		return;
+	}
+	dev_regions[n_dev_regions++] = (dev_region_t){
+		.start = (char*) start,
+		.end = (char*) end,
+	};
+}
+
 void sbi_step_interrupt(struct sbi_trap_regs *regs, uintptr_t handlerva) {
 	uint32_t* handler = (uint32_t*) epcpa(handlerva);
 	sbi_printf("sbi_step_interrupt, handler: %p\n", handler);
@@ -200,6 +286,61 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 		while (1) {}
 	}
 
+	unsigned long* regsidx = (unsigned long*) regs;
+
+	size_t imm;
+	char* addr;
+	switch (OP(insn)) {
+		case OP_FENCE:
+			on_fence_dev();
+			break;
+		case OP_LOAD:
+			imm = extract_imm(insn, IMM_I);
+			addr = (char*) (regsidx[RS1(insn)] + imm);
+
+			switch (FUNCT3(insn)) {
+				case EXT_BYTEU:
+				case EXT_BYTE:
+					on_load(addr, 1);
+					break;
+				case EXT_HALFU:
+				case EXT_HALF:
+					on_load(addr, 2);
+					break;
+				case EXT_WORDU:
+				case EXT_WORD:
+					on_load(addr, 4);
+					break;
+				case EXT_DWORD:
+					on_load(addr, 8);
+					break;
+				default:
+					assert(0);
+			}
+			break;
+		case OP_STORE:
+			imm = extract_imm(insn, IMM_S);
+			addr = (char*) (regsidx[RS1(insn)] + imm);
+
+			switch (FUNCT3(insn)) {
+				case EXT_BYTE:
+					on_store(addr, 1);
+					break;
+				case EXT_HALF:
+					on_store(addr, 2);
+					break;
+				case EXT_WORD:
+					on_store(addr, 4);
+					break;
+				case EXT_DWORD:
+					on_store(addr, 8);
+					break;
+				default:
+					assert(0);
+			}
+			break;
+	}
+
 	// replace current breakpoint with orig bytes
 	*brkpt = insn;
 	RISCV_FENCE_I;
@@ -208,7 +349,6 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 
 	// decode instruction to decide where to jump next
 	uintptr_t nextva;
-	unsigned long* regsidx = (unsigned long*) regs;
 	switch (OP(insn)) {
 		case OP_JAL:
 			nextva = regs->mepc + extract_imm(insn, IMM_J);
@@ -271,7 +411,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 }
 
 /* static ulong prev_mideleg; */
-static ulong prev_medeleg;
+/* static ulong prev_medeleg; */
 
 static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
     _sbi_step_enabled = 1;
@@ -280,9 +420,9 @@ static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
 	place_breakpoint((uint32_t*) next);
 
 	/* prev_mideleg = csr_read(CSR_MIDELEG); */
-	prev_medeleg = csr_read(CSR_MEDELEG);
+	/* prev_medeleg = csr_read(CSR_MEDELEG); */
 	/* csr_write(CSR_MIDELEG, 0); */
-	csr_write(CSR_MEDELEG, 0);
+	/* csr_write(CSR_MEDELEG, 0); */
 }
 
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
@@ -290,7 +430,7 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	if (_sbi_step_enabled) {
 		*brkpt = insn;
 		/* csr_write(CSR_MIDELEG, prev_mideleg); */
-		csr_write(CSR_MEDELEG, prev_medeleg);
+		/* csr_write(CSR_MEDELEG, prev_medeleg); */
 	}
 
     _sbi_step_enabled = 0;
@@ -309,6 +449,14 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			break;
 		case SBI_EXT_STEP_DISABLE:
 			sbi_ecall_step_disable(regs);
+			break;
+		case SBI_EXT_STEP_TEXT_REGION:
+			text_region.active = true;
+			text_region.start = (char*) regs->a0;
+			text_region.end = (char*) regs->a1;
+			break;
+		case SBI_EXT_STEP_DEVFENCE_REGION:
+			sbi_ecall_step_devfence_region((void*) regs->a0, (void*) regs->a1);
 			break;
 	}
 	return ret;
