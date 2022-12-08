@@ -2,6 +2,7 @@
 *.o
 *.a
 *.dep
+.knit
 
 #Build & install directories
 build/

@@ -1,0 +1,6 @@
+return b{
+$ all:VB:
+    CROSS_COMPILE=riscv64-unknown-elf- make FW_TEXT_ADDR=0x80000000 FW_JUMP=y FW_JUMP_ADDR=0x84010000 PLATFORM=generic
+$ force:VB:
+    CROSS_COMPILE=riscv64-unknown-elf- make FW_TEXT_ADDR=0x80000000 FW_JUMP=y FW_JUMP_ADDR=0x84010000 PLATFORM=generic -B
+}

@@ -29,6 +29,7 @@
 #define SBI_EXT_HSM				0x48534D
 #define SBI_EXT_SRST				0x53525354
 #define SBI_EXT_PMU				0x504D55
+#define SBI_EXT_STEP 0x0A000000
 
 /* SBI function IDs for BASE extension*/
 #define SBI_EXT_BASE_GET_SPEC_VERSION		0x0
@@ -38,6 +39,11 @@
 #define SBI_EXT_BASE_GET_MVENDORID		0x4
 #define SBI_EXT_BASE_GET_MARCHID		0x5
 #define SBI_EXT_BASE_GET_MIMPID			0x6
+
+/* SBI function IDs for STEP extension */
+#define SBI_EXT_STEP_ENABLED 0x0
+#define SBI_EXT_STEP_ENABLE 0x1
+#define SBI_EXT_STEP_DISABLE 0x2
 
 /* SBI function IDs for TIME extension*/
 #define SBI_EXT_TIME_SET_TIMER			0x0
