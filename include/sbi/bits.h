@@ -56,8 +56,12 @@ static inline uint32_t bits_remap(uint32_t i, unsigned from_ub, unsigned from_lb
     return bits_get(i, from_ub, from_lb) << to_lb;
 }
 
+static inline int64_t sext64(uint64_t x, unsigned width) {
+    unsigned n = 63 - (width-1);
+    return ((int64_t)(x << n)) >> n;
+}
 
-static inline int sext(unsigned x, unsigned width) {
+static inline int sext32(unsigned x, unsigned width) {
     unsigned n = 31 - (width-1);
     return ((int)(x << n)) >> n;
 }

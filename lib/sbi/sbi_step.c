@@ -146,21 +146,21 @@ typedef enum {
 #define FUNCT3(x) bits_get(x, 14, 12)
 #define FUNCT7(x) bits_get(x, 31, 25)
 
-static uint32_t extract_imm(uint32_t insn, imm_type_t type) {
+static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
     switch (type) {
         case IMM_I:
-            return sext(bits_remap(insn, 31, 20, 11, 0), 12);
+            return sext64(bits_remap(insn, 31, 20, 11, 0), 12);
         case IMM_S:
-            return sext(
+            return sext64(
                 bits_remap(insn, 11, 7, 4, 0) | bits_remap(insn, 31, 25, 11, 5),
                 12);
         case IMM_B:
-            return sext(bit_remap(insn, 7, 11) | bits_remap(insn, 11, 8, 4, 1) |
+            return sext64(bit_remap(insn, 7, 11) | bits_remap(insn, 11, 8, 4, 1) |
                             bits_remap(insn, 30, 25, 10, 5) |
                             bit_remap(insn, 31, 12),
                         13);
         case IMM_J:
-            return sext(
+            return sext64(
                 bit_remap(insn, 31, 20) | bits_remap(insn, 30, 21, 10, 1) |
                     bit_remap(insn, 20, 11) | bits_remap(insn, 19, 12, 19, 12),
                 21);
@@ -210,9 +210,11 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 				case 0b100:
 				case 0b101:
 					res = (intptr_t)regsidx[RS1(insn)] < (intptr_t)regsidx[RS2(insn)];
+					break;
 				case 0b110:
 				case 0b111:
 					res = regsidx[RS1(insn)] < regsidx[RS2(insn)];
+					break;
 			}
 			int cond = false;
 			switch (FUNCT3(insn)) {
@@ -220,10 +222,12 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 				case 0b101:
 				case 0b111:
 					cond = res == 0;
+					break;
 				case 0b001:
 				case 0b100:
 				case 0b110:
 					cond = res != 0;
+					break;
 			}
 			if (cond) {
 				nextva = regs->mepc + extract_imm(insn, IMM_B);
@@ -249,6 +253,9 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 	RISCV_FENCE_I;
 }
 
+/* static ulong prev_mideleg; */
+/* static ulong prev_medeleg; */
+
 static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
     _sbi_step_enabled = 1;
 	uintptr_t next = epcpa(regs->mepc) + 4;
@@ -257,16 +264,23 @@ static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
 	insn = *brkpt;
 	*brkpt = INSN_EBREAK;
 	RISCV_FENCE_I;
-	// TODO: disable trap delegation in mideleg and medeleg
+
+	/* prev_mideleg = csr_read(CSR_MIDELEG); */
+	/* prev_medeleg = csr_read(CSR_MEDELEG); */
+	/* csr_write(CSR_MIDELEG, 0); */
+	/* csr_write(CSR_MEDELEG, 0); */
 }
 
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
+	// remove breakpoint
+	if (_sbi_step_enabled) {
+		*brkpt = insn;
+		/* csr_write(CSR_MIDELEG, prev_mideleg); */
+		/* csr_write(CSR_MEDELEG, prev_medeleg); */
+	}
+
     _sbi_step_enabled = 0;
 
-	// TODO: reset mideleg and medeleg
-
-	// remove breakpoint
-	*brkpt = insn;
 	RISCV_FENCE_I;
 }
 
