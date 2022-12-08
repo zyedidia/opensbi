@@ -112,9 +112,17 @@ static uint32_t* brkpt;
 static uint32_t insn;
 
 enum {
+	INSN_ECALL = 0x00000073,
 	INSN_EBREAK = 0x00100073,
 	INSN_SRET = 0x10200073,
 };
+
+static void place_breakpoint(uint32_t* loc) {
+	insn = *loc;
+	brkpt = loc;
+	*brkpt = INSN_EBREAK;
+	RISCV_FENCE_I;
+}
 
 typedef enum {
     OP_RARITH = 0b0110011,
@@ -171,6 +179,13 @@ static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
 	return 0;
 }
 
+void sbi_step_interrupt(struct sbi_trap_regs *regs, uintptr_t handlerva) {
+	uint32_t* handler = (uint32_t*) epcpa(handlerva);
+	sbi_printf("sbi_step_interrupt, handler: %p\n", handler);
+	// put a breakpoint at the start of the interrupt handler
+	place_breakpoint(handler);
+}
+
 // Called when we reach a breakpoint with single stepping enabled. We should
 // move the breakpoint one instruction further and continue. If the current
 // instruction is a jump, branch, or sret then we need to calculate what
@@ -178,7 +193,7 @@ static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
-	sbi_printf("sbi_step_breakpoint, epc: %p\n", epc);
+	/* sbi_printf("sbi_step_breakpoint, epc: %p\n", epc); */
 
 	if (epc != brkpt) {
 		sbi_printf("ERROR: epc != brkpt\n");
@@ -187,6 +202,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 
 	// replace current breakpoint with orig bytes
 	*brkpt = insn;
+	RISCV_FENCE_I;
 
 	pagetable_t* pt = get_pt();
 
@@ -236,39 +252,37 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 			}
 			break;
 		default:
-			if (insn == INSN_SRET) {
-				nextva = csr_read(CSR_SEPC);
-			} else {
-				nextva = regs->mepc + 4;
+			switch (insn) {
+				case INSN_SRET:
+					nextva = csr_read(CSR_SEPC);
+					break;
+				case INSN_ECALL:
+					nextva = csr_read(CSR_STVEC);
+					break;
+				default:
+					nextva = regs->mepc + 4;
 			}
 	}
 	uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL);
-	sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next);
+	/* sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next); */
 
 	// place breakpoint there
-	brkpt = next;
-	insn = *brkpt;
-	*brkpt = INSN_EBREAK;
-
-	RISCV_FENCE_I;
+	place_breakpoint(next);
 }
 
 /* static ulong prev_mideleg; */
-/* static ulong prev_medeleg; */
+static ulong prev_medeleg;
 
 static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
     _sbi_step_enabled = 1;
 	uintptr_t next = epcpa(regs->mepc) + 4;
 	// place breakpoint at EPC+4
-	brkpt = (uint32_t*) next;
-	insn = *brkpt;
-	*brkpt = INSN_EBREAK;
-	RISCV_FENCE_I;
+	place_breakpoint((uint32_t*) next);
 
 	/* prev_mideleg = csr_read(CSR_MIDELEG); */
-	/* prev_medeleg = csr_read(CSR_MEDELEG); */
+	prev_medeleg = csr_read(CSR_MEDELEG);
 	/* csr_write(CSR_MIDELEG, 0); */
-	/* csr_write(CSR_MEDELEG, 0); */
+	csr_write(CSR_MEDELEG, 0);
 }
 
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
@@ -276,7 +290,7 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	if (_sbi_step_enabled) {
 		*brkpt = insn;
 		/* csr_write(CSR_MIDELEG, prev_mideleg); */
-		/* csr_write(CSR_MEDELEG, prev_medeleg); */
+		csr_write(CSR_MEDELEG, prev_medeleg);
 	}
 
     _sbi_step_enabled = 0;
