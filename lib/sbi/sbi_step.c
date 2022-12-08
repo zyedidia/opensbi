@@ -364,7 +364,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 		case OP_JALR:
 			nextva = regsidx[RS1(insn)] + extract_imm(insn, IMM_I);
 			break;
-		case OP_BRANCH:
+		case OP_BRANCH:;
 			uintptr_t res = 0;
 			switch (FUNCT3(insn)) {
 				case 0b000:
