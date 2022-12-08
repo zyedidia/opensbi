@@ -22,6 +22,8 @@ int sbi_step_enabled() {
     return _sbi_step_enabled;
 }
 
+// Since OpenSBI runs in M-mode, which has virtual memory disabled, we have to
+// manually convert VAs to PAs by walking the pagetable.
 typedef struct {
 	uintptr_t valid:1;
 	uintptr_t read:1;
@@ -39,10 +41,12 @@ typedef struct {
 } pte_t;
 _Static_assert(sizeof(pte_t) == 8, "invalid size for pte_t");
 
+// Returns the physical address stored in a pte.
 static uintptr_t pte_pa(pte_t* pte) {
 	return ((uintptr_t)pte->ppn0 << 12) | ((uintptr_t)pte->ppn1 << 21) | ((uintptr_t)pte->ppn2 << 30);
 }
 
+// Given a leaf pte and a va, converts the va to a pa.
 static uintptr_t pte_va2pa(pte_t* pte, int level, uintptr_t va) {
 	switch (level) {
 		case 2:
@@ -55,6 +59,7 @@ static uintptr_t pte_va2pa(pte_t* pte, int level, uintptr_t va) {
 	return 0;
 }
 
+// Returns true if this is a leaf pte.
 static int pte_leaf(pte_t* pte) {
 	return pte->valid && (pte->read || pte->write || pte->exec);
 }
@@ -63,14 +68,12 @@ typedef struct {
 	pte_t ptes[512];
 } pagetable_t;
 
-/* static ulong prev_mideleg; */
-/* static ulong prev_medeleg; */
-/* static int prev_tvm; */
-
+// Returns the virtual page number of a va at a given pagetable level.
 static uintptr_t vpn(int level, uintptr_t va) {
 	return (va >> (12+9*level)) & ((1UL << 9) - 1);
 }
 
+// Converts a virtual address to physical address by walking the pagetable.
 static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed) {
 	if (!pt) {
 		return va;
@@ -92,6 +95,7 @@ static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed) {
 	return pte_va2pa(&pt->ptes[vpn(endlevel, va)], endlevel, va);
 }
 
+// Gets the currently active pagetable.
 static pagetable_t* get_pt() {
 	uintptr_t satp = csr_read(CSR_SATP);
 	assert((satp >> 60) == 8);
@@ -167,6 +171,11 @@ static uint32_t extract_imm(uint32_t insn, imm_type_t type) {
 	return 0;
 }
 
+// Called when we reach a breakpoint with single stepping enabled. We should
+// move the breakpoint one instruction further and continue. If the current
+// instruction is a jump, branch, or sret then we need to calculate what
+// address the instruction will jump to next (by partially evaluting the
+// instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 	sbi_printf("sbi_step_breakpoint, epc: %p\n", epc);
