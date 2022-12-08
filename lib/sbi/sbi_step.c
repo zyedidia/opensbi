@@ -203,6 +203,14 @@ int dev_active;
 
 dev_region_t text_region;
 
+typedef struct {
+	void* start;
+	size_t sz;
+	bool active;
+} heap_t;
+
+heap_t heap;
+
 /* FENCE CHECKER */
 /* static void on_fence_i() { */
 /*  */
@@ -438,6 +446,14 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	RISCV_FENCE_I;
 }
 
+static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
+	heap = (heap_t){
+		.active = true,
+		.start = heap_start,
+		.sz = sz,
+	};
+}
+
 static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, const struct sbi_trap_regs *regs, unsigned long *out_val, struct sbi_trap_info *out_trap) {
 	int ret = 0;
 	switch (funcid) {
@@ -457,6 +473,9 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			break;
 		case SBI_EXT_STEP_DEVFENCE_REGION:
 			sbi_ecall_step_devfence_region((void*) regs->a0, (void*) regs->a1);
+			break;
+		case SBI_EXT_STEP_SET_HEAP:
+			sbi_ecall_step_set_heap((void*) regs->a0, (size_t) regs->a1);
 			break;
 	}
 	return ret;

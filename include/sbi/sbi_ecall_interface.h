@@ -46,6 +46,7 @@
 #define SBI_EXT_STEP_DISABLE 0x2
 #define SBI_EXT_STEP_DEVFENCE_REGION 0x3
 #define SBI_EXT_STEP_TEXT_REGION 0x4
+#define SBI_EXT_STEP_SET_HEAP 0x5
 
 /* SBI function IDs for TIME extension*/
 #define SBI_EXT_TIME_SET_TIMER			0x0
