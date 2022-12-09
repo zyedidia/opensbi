@@ -20,6 +20,10 @@ static void assert(int cond) {
 }
 
 static int _sbi_step_enabled;
+static unsigned _sbi_flags;
+
+#define FLAG_SET(val, flag) (((val & flag) != 0))
+#define OPT_SET(flag) (((_sbi_flags & flag) != 0))
 
 int sbi_step_enabled() {
     return _sbi_step_enabled;
@@ -192,18 +196,32 @@ static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
 	return 0;
 }
 
-typedef struct {
+typedef struct region {
 	char* start;
-	char* end;
-	bool active;
-} dev_region_t;
+	size_t sz;
+	struct region* next;
+} region_t;
 
-int n_dev_regions;
-#define MAX_DEV_REGION 10
-dev_region_t dev_regions[MAX_DEV_REGION];
-int dev_active;
+region_t* dev_regions;
+region_t* dev_active;
 
-dev_region_t text_region;
+region_t* rdonly_regions;
+region_t* noexec_regions;
+region_t* rdwr_regions;
+
+void* kr_malloc(unsigned nbytes);
+void kr_free(void* ptr);
+
+static void free_regions(region_t** regions) {
+	region_t* r = *regions;
+	*regions = NULL;
+	while (r) {
+		region_t* next = r->next;
+		r->next = NULL;
+		kr_free(r);
+		r = next;
+	}
+}
 
 typedef struct {
 	char* start;
@@ -241,9 +259,6 @@ void* sbrk(size_t increment) {
 	heap.brk += increment;
 	return p;
 }
-
-void* kr_malloc(unsigned nbytes);
-void kr_free(void* ptr);
 
 #define NALLOC 1024 /* minimum #units to request */
 /* morecore: ask system for more memory */
@@ -312,15 +327,18 @@ void kr_free(void* ap) {
 
 ht_t fence_ht;
 
-/* FENCE CHECKER */
 static void on_fence_i() {
-	// clear all unflushed addresses
-	sbi_memset(&fence_ht.entries[0], 0, sizeof(ht_entry_t) * fence_ht.cap);
-	fence_ht.len = 0;
+	if (OPT_SET(SS_IFENCE)) {
+		// clear all unflushed addresses
+		sbi_memset(&fence_ht.entries[0], 0, sizeof(ht_entry_t) * fence_ht.cap);
+		fence_ht.len = 0;
+	}
 }
 
 static void on_fence_dev() {
-	dev_regions[dev_active].active = false;
+	if (OPT_SET(SS_REGION)) {
+		dev_active = NULL;
+	}
 }
 
 /* static void on_fence_vma() { */
@@ -328,67 +346,89 @@ static void on_fence_dev() {
 /* } */
 
 static void on_load(char* addr, size_t sz) {
-	for (int i = 0; i < n_dev_regions; i++) {
-		if (i == dev_active && dev_regions[dev_active].active)
-			continue;
-		if (addr >= dev_regions[i].start && addr <= dev_regions[i].end) {
-			if (dev_regions[dev_active].active) {
-				sbi_printf("ERROR: load from inactive device region\n");
-				sbi_hart_hang();
+	if (OPT_SET(SS_REGION)) {
+		region_t* r = dev_regions;
+		while (r) {
+			if (r != dev_active) {
+				if (addr >= r->start && addr < r->start + r->sz) {
+					if (dev_active) {
+						sbi_printf("ERROR: load from inactive device region\n");
+						sbi_hart_hang();
+					}
+					dev_active = r;
+					break;
+				}
 			}
-			dev_active = i;
-			dev_regions[dev_active].active = true;
+			r = r->next;
 		}
 	}
 }
 
 static void on_store(char* addr, size_t sz) {
-	if (ht_put(&fence_ht, (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
-		sbi_printf("ERROR: ran out of memory\n");
-		sbi_hart_hang();
+	if (OPT_SET(SS_IFENCE)) {
+		if (ht_put(&fence_ht, (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
+			sbi_printf("ERROR: ifence checker ran out of memory\n");
+			sbi_hart_hang();
+		}
 	}
 
-	if (text_region.active && addr >= text_region.start && addr <= text_region.end) {
-		sbi_printf("ERROR: store to text segment\n");
-		sbi_hart_hang();
-	}
-
-	for (int i = 0; i < n_dev_regions; i++) {
-		if (i == dev_active && dev_regions[dev_active].active)
-			continue;
-		if (addr >= dev_regions[i].start && addr <= dev_regions[i].end) {
-			if (dev_regions[dev_active].active) {
-				sbi_printf("ERROR: store to inactive device region\n");
+	if (OPT_SET(SS_REGION)) {
+		region_t* r = rdonly_regions;
+		while (r) {
+			if (addr >= r->start && addr < r->start + r->sz) {
+				sbi_printf("ERROR: store to read-only region\n");
 				sbi_hart_hang();
 			}
-			dev_active = i;
-			dev_regions[dev_active].active = true;
+			r = r->next;
+		}
+
+		r = dev_regions;
+		while (r) {
+			if (r != dev_active) {
+				if (addr >= r->start && addr < r->start + r->sz) {
+					if (dev_active) {
+						sbi_printf("ERROR: store to inactive device region\n");
+						sbi_hart_hang();
+					}
+					dev_active = r;
+					break;
+				}
+			}
+			r = r->next;
 		}
 	}
 }
 
-static void on_execute(void* addr) {
-	if (ht_get(&fence_ht, (uint64_t) addr, NULL)) {
-		sbi_printf("ERROR: attempt to execute unfenced instruction\n");
-		sbi_hart_hang();
-	}
-}
+static uint64_t equiv_hash = 0xdeadbeef;
 
-static void sbi_ecall_step_devfence_region(void* start, void* end) {
-	if (n_dev_regions >= MAX_DEV_REGION) {
-		return;
+static void on_execute(char* addr, struct sbi_trap_regs* regs) {
+	if (OPT_SET(SS_REGION)) {
+		region_t* r = noexec_regions;
+		while (r) {
+			if (addr >= r->start && addr < r->start + r->sz) {
+				sbi_printf("ERROR: attempt to execute noexec region\n");
+				sbi_hart_hang();
+			}
+			r = r->next;
+		}
 	}
-	dev_regions[n_dev_regions++] = (dev_region_t){
-		.start = (char*) start,
-		.end = (char*) end,
-	};
-}
 
-void sbi_step_interrupt(struct sbi_trap_regs *regs, uintptr_t handlerva) {
-	uint32_t* handler = (uint32_t*) epcpa(handlerva);
-	sbi_printf("sbi_step_interrupt, handler: %p\n", handler);
-	// put a breakpoint at the start of the interrupt handler
-	place_breakpoint(handler);
+	if (OPT_SET(SS_IFENCE)) {
+		if (ht_get(&fence_ht, (uint64_t) addr, NULL)) {
+			sbi_printf("ERROR: attempt to execute unfenced instruction\n");
+			sbi_hart_hang();
+		}
+	}
+
+	if (OPT_SET(SS_EQUIV)) {
+		uint64_t hash = ht_hash(equiv_hash ^ (uint64_t) addr);
+		uint64_t* regsidx = (uint64_t*) regs;
+		for (int i = 0; i < 32; i++) {
+			hash = ht_hash(hash ^ regsidx[i]);
+		}
+		equiv_hash = hash;
+		sbi_printf("%lx\n", equiv_hash);
+	}
 }
 
 // Called when we reach a breakpoint with single stepping enabled. We should
@@ -396,7 +436,7 @@ void sbi_step_interrupt(struct sbi_trap_regs *regs, uintptr_t handlerva) {
 // instruction is a jump, branch, or sret then we need to calculate what
 // address the instruction will jump to next (by partially evaluting the
 // instruction), and put the breakpoint there.
-void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
+void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 	/* sbi_printf("sbi_step_breakpoint, epc: %p\n", epc); */
 
@@ -407,7 +447,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 
 	unsigned long* regsidx = (unsigned long*) regs;
 
-	on_execute(epc);
+	on_execute((char*) epc, regs);
 
 	size_t imm;
 	char* addr;
@@ -525,7 +565,12 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 					nextva = csr_read(CSR_SEPC);
 					break;
 				case INSN_ECALL:
-					nextva = csr_read(CSR_STVEC);
+					if (OPT_SET(SS_NOSTEP_ECALL)) {
+						// user does not want to single step the ecall handler
+						nextva = regs->mepc + 4;
+					} else {
+						nextva = csr_read(CSR_STVEC);
+					}
 					break;
 				default:
 					nextva = regs->mepc + 4;
@@ -538,33 +583,38 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 	place_breakpoint(next);
 }
 
-/* static ulong prev_mideleg; */
-/* static ulong prev_medeleg; */
-
-static void sbi_ecall_step_enable_at(uintptr_t addr) {
+static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 	_sbi_step_enabled = 1;
+	_sbi_flags = flags;
 	uintptr_t next = epcpa(addr);
 	// place breakpoint at EPC+4
 	place_breakpoint((uint32_t*) next);
-	if (ht_alloc(&fence_ht, 128) == -1) {
-		sbi_printf("ERROR: could not allocate fence hashtable\n");
-		sbi_hart_hang();
-	}
 
-	/* prev_mideleg = csr_read(CSR_MIDELEG); */
-	/* prev_medeleg = csr_read(CSR_MEDELEG); */
-	/* csr_write(CSR_MIDELEG, 0); */
-	/* csr_write(CSR_MEDELEG, 0); */
+	if (OPT_SET(SS_IFENCE)) {
+		if (ht_alloc(&fence_ht, 128) == -1) {
+			sbi_printf("ERROR: could not allocate fence hashtable\n");
+			sbi_hart_hang();
+		}
+	}
 }
 
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	// remove breakpoint
 	if (_sbi_step_enabled) {
 		*brkpt = insn;
-		/* csr_write(CSR_MIDELEG, prev_mideleg); */
-		/* csr_write(CSR_MEDELEG, prev_medeleg); */
 	}
-	ht_free(&fence_ht);
+
+	if (OPT_SET(SS_IFENCE)) {
+		ht_free(&fence_ht);
+	}
+
+	if (OPT_SET(SS_REGION)) {
+		free_regions(&dev_regions);
+		dev_active = NULL;
+		free_regions(&rdonly_regions);
+		free_regions(&noexec_regions);
+		free_regions(&rdwr_regions);
+	}
 
     _sbi_step_enabled = 0;
 
@@ -580,8 +630,43 @@ static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
 	};
 }
 
-static void sbi_ecall_step_mark_alloc(void* ptr, size_t sz) {}
-static void sbi_ecall_step_mark_free(void* ptr) {}
+static void sbi_ecall_step_mark_region(void* start, size_t sz, unsigned flags) {
+	if (FLAG_SET(flags, SS_REGION_DEVICE)) {
+		region_t* r = (region_t*) kr_malloc(sizeof(region_t));
+		r->next = dev_regions;
+		r->start = start;
+		r->sz = sz;
+		dev_regions = r;
+	}
+	if (FLAG_SET(flags, SS_REGION_RDONLY)) {
+		region_t* r = (region_t*) kr_malloc(sizeof(region_t));
+		r->next = rdonly_regions;
+		r->start = start;
+		r->sz = sz;
+		rdonly_regions = r;
+	}
+	if (FLAG_SET(flags, SS_REGION_NOEXEC)) {
+		region_t* r = (region_t*) kr_malloc(sizeof(region_t));
+		r->next = noexec_regions;
+		r->start = start;
+		r->sz = sz;
+		noexec_regions = r;
+	}
+	if (FLAG_SET(flags, SS_REGION_RDWR)) {
+		region_t* r = (region_t*) kr_malloc(sizeof(region_t));
+		r->next = rdwr_regions;
+		r->start = start;
+		r->sz = sz;
+		rdwr_regions = r;
+	}
+}
+
+static void sbi_ecall_step_mem_alloc(void* ptr, size_t sz) {}
+static void sbi_ecall_step_mem_free(void* ptr) {}
+
+static int sbi_ecall_step_equiv_hash() {
+	return equiv_hash;
+}
 
 static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, const struct sbi_trap_regs *regs, unsigned long *out_val, struct sbi_trap_info *out_trap) {
 	int ret = 0;
@@ -590,29 +675,28 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			ret = sbi_step_enabled();
 			break;
 		case SBI_EXT_STEP_ENABLE:
-			sbi_ecall_step_enable_at(regs->mepc + 4);
+			sbi_ecall_step_enable_at(regs->mepc + 4, regs->a0);
 			break;
 		case SBI_EXT_STEP_ENABLE_AT:
-			sbi_ecall_step_enable_at(regs->a0);
+			sbi_ecall_step_enable_at(regs->a0, regs->a1);
+			break;
 		case SBI_EXT_STEP_DISABLE:
 			sbi_ecall_step_disable(regs);
-			break;
-		case SBI_EXT_STEP_TEXT_REGION:
-			text_region.active = true;
-			text_region.start = (char*) regs->a0;
-			text_region.end = (char*) regs->a1;
-			break;
-		case SBI_EXT_STEP_DEVFENCE_REGION:
-			sbi_ecall_step_devfence_region((void*) regs->a0, (void*) regs->a1);
 			break;
 		case SBI_EXT_STEP_SET_HEAP:
 			sbi_ecall_step_set_heap((void*) regs->a0, (size_t) regs->a1);
 			break;
-		case SBI_EXT_STEP_MARK_ALLOC:
-			sbi_ecall_step_mark_alloc((void*) regs->a0, (size_t) regs->a1);
+		case SBI_EXT_STEP_MEM_ALLOC:
+			sbi_ecall_step_mem_alloc((void*) regs->a0, (size_t) regs->a1);
 			break;
-		case SBI_EXT_STEP_MARK_FREE:
-			sbi_ecall_step_mark_free((void*) regs->a0);
+		case SBI_EXT_STEP_MEM_FREE:
+			sbi_ecall_step_mem_free((void*) regs->a0);
+			break;
+		case SBI_EXT_STEP_MARK_REGION:
+			sbi_ecall_step_mark_region((void*) regs->a0, (size_t) regs->a1, regs->a2);
+			break;
+		case SBI_EXT_STEP_EQUIV_HASH:
+			ret = sbi_ecall_step_equiv_hash();
 			break;
 	}
 	return ret;
