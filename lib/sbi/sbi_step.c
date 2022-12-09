@@ -204,12 +204,107 @@ int dev_active;
 dev_region_t text_region;
 
 typedef struct {
-	void* start;
+	char* start;
+	char* brk;
 	size_t sz;
 	bool active;
 } heap_t;
 
 heap_t heap;
+
+#define roundup(x,n) (((x)+((n)-1))&(~((n)-1)))
+
+union align {
+	double d;
+	void *p;
+	void (*fp)(void);
+};
+
+typedef union header { /* block header */
+	struct {
+		union header *ptr; /* next block if on free list */
+		unsigned size; /* size of this block */
+	} s;
+	union align x; /* force alignment of blocks */
+} header_t;
+
+static header_t base; /* empty list to get started */
+static header_t *freep = NULL; /* start of free list */
+
+void* sbrk(size_t increment) {
+	if (heap.brk >= heap.start + heap.sz) {
+		return NULL;
+	}
+	void* p = heap.brk;
+	heap.brk += increment;
+	return p;
+}
+
+void* kr_malloc(unsigned nbytes);
+void kr_free(void* ptr);
+
+#define NALLOC 1024 /* minimum #units to request */
+/* morecore: ask system for more memory */
+static header_t* morecore(unsigned nu) {
+	char *cp;
+	header_t *up;
+	if (nu < NALLOC)
+		nu = NALLOC;
+	cp = sbrk(nu * sizeof(header_t));
+	if (cp == (char *) -1) /* no space at all */
+		return NULL;
+	up = (header_t *) cp;
+	up->s.size = nu;
+	kr_free((void *)(up+1));
+	return freep;
+}
+
+void* kr_malloc(unsigned nbytes) {
+	header_t *p, *prevp;
+	header_t *morecore(unsigned);
+	unsigned nunits;
+	nunits = (nbytes+sizeof(header_t)-1)/sizeof(header_t) + 1;
+	if ((prevp = freep) == NULL) { /* no free list yet */
+		base.s.ptr = freep = prevp = &base;
+		base.s.size = 0;
+	}
+	for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {
+		if (p->s.size >= nunits) { /* big enough */
+			if (p->s.size == nunits) /* exactly */
+				prevp->s.ptr = p->s.ptr;
+			else { /* allocate tail end */
+				p->s.size -= nunits;
+				p += p->s.size;
+				p->s.size = nunits;
+			}
+			freep = prevp;
+			return (void *)(p+1);
+		}
+		if (p == freep) /* wrapped around free list */
+			if ((p = morecore(nunits)) == NULL)
+				return NULL; /* none left */
+	}
+}
+
+/* free: put block ap in free list */
+void kr_free(void* ap) {
+	header_t *bp, *p;
+	bp = (header_t *)ap - 1; /* point to block header */
+	for (p = freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr)
+		if (p >= p->s.ptr && (bp > p || bp < p->s.ptr))
+			break; /* freed block at start or end of arena */
+	if (bp + bp->s.size == p->s.ptr) { /* join to upper nbr */
+		bp->s.size += p->s.ptr->s.size;
+		bp->s.ptr = p->s.ptr->s.ptr;
+	} else
+		bp->s.ptr = p->s.ptr;
+	if (p + p->s.size == bp) { /* join to lower nbr */
+		p->s.size += bp->s.size;
+		p->s.ptr = bp->s.ptr;
+	} else
+		p->s.ptr = bp;
+	freep = p;
+}
 
 /* FENCE CHECKER */
 /* static void on_fence_i() { */
@@ -421,9 +516,9 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 /* static ulong prev_mideleg; */
 /* static ulong prev_medeleg; */
 
-static void sbi_ecall_step_enable(const struct sbi_trap_regs *regs) {
-    _sbi_step_enabled = 1;
-	uintptr_t next = epcpa(regs->mepc) + 4;
+static void sbi_ecall_step_enable_at(uintptr_t addr) {
+	_sbi_step_enabled = 1;
+	uintptr_t next = epcpa(addr);
 	// place breakpoint at EPC+4
 	place_breakpoint((uint32_t*) next);
 
@@ -449,10 +544,14 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
 	heap = (heap_t){
 		.active = true,
-		.start = heap_start,
+		.start = (char*) heap_start,
+		.brk = (char*) heap_start,
 		.sz = sz,
 	};
 }
+
+static void sbi_ecall_step_mark_alloc(void* ptr, size_t sz) {}
+static void sbi_ecall_step_mark_free(void* ptr) {}
 
 static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, const struct sbi_trap_regs *regs, unsigned long *out_val, struct sbi_trap_info *out_trap) {
 	int ret = 0;
@@ -461,8 +560,10 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			ret = sbi_step_enabled();
 			break;
 		case SBI_EXT_STEP_ENABLE:
-			sbi_ecall_step_enable(regs);
+			sbi_ecall_step_enable_at(regs->mepc + 4);
 			break;
+		case SBI_EXT_STEP_ENABLE_AT:
+			sbi_ecall_step_enable_at(regs->a0);
 		case SBI_EXT_STEP_DISABLE:
 			sbi_ecall_step_disable(regs);
 			break;
@@ -476,6 +577,12 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			break;
 		case SBI_EXT_STEP_SET_HEAP:
 			sbi_ecall_step_set_heap((void*) regs->a0, (size_t) regs->a1);
+			break;
+		case SBI_EXT_STEP_MARK_ALLOC:
+			sbi_ecall_step_mark_alloc((void*) regs->a0, (size_t) regs->a1);
+			break;
+		case SBI_EXT_STEP_MARK_FREE:
+			sbi_ecall_step_mark_free((void*) regs->a0);
 			break;
 	}
 	return ret;
