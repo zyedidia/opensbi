@@ -9,6 +9,8 @@
 #include <sbi/riscv_barrier.h>
 #include <sbi/sbi_console.h>
 #include <sbi/bits.h>
+#include <sbi/sbi_step_ht.h>
+#include <sbi/sbi_string.h>
 
 static void assert(int cond) {
 	if (!cond) {
@@ -246,12 +248,14 @@ void kr_free(void* ptr);
 #define NALLOC 1024 /* minimum #units to request */
 /* morecore: ask system for more memory */
 static header_t* morecore(unsigned nu) {
+	if (!heap.active)
+		return NULL;
 	char *cp;
 	header_t *up;
 	if (nu < NALLOC)
 		nu = NALLOC;
 	cp = sbrk(nu * sizeof(header_t));
-	if (cp == (char *) -1) /* no space at all */
+	if (cp == NULL) /* no space at all */
 		return NULL;
 	up = (header_t *) cp;
 	up->s.size = nu;
@@ -306,10 +310,14 @@ void kr_free(void* ap) {
 	freep = p;
 }
 
+ht_t fence_ht;
+
 /* FENCE CHECKER */
-/* static void on_fence_i() { */
-/*  */
-/* } */
+static void on_fence_i() {
+	// clear all unflushed addresses
+	sbi_memset(&fence_ht.entries[0], 0, sizeof(ht_entry_t) * fence_ht.cap);
+	fence_ht.len = 0;
+}
 
 static void on_fence_dev() {
 	dev_regions[dev_active].active = false;
@@ -335,6 +343,11 @@ static void on_load(char* addr, size_t sz) {
 }
 
 static void on_store(char* addr, size_t sz) {
+	if (ht_put(&fence_ht, (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
+		sbi_printf("ERROR: ran out of memory\n");
+		sbi_hart_hang();
+	}
+
 	if (text_region.active && addr >= text_region.start && addr <= text_region.end) {
 		sbi_printf("ERROR: store to text segment\n");
 		sbi_hart_hang();
@@ -354,9 +367,12 @@ static void on_store(char* addr, size_t sz) {
 	}
 }
 
-/* static void on_execute(void* addr) { */
-/*  */
-/* } */
+static void on_execute(void* addr) {
+	if (ht_get(&fence_ht, (uint64_t) addr, NULL)) {
+		sbi_printf("ERROR: attempt to execute unfenced instruction\n");
+		sbi_hart_hang();
+	}
+}
 
 static void sbi_ecall_step_devfence_region(void* start, void* end) {
 	if (n_dev_regions >= MAX_DEV_REGION) {
@@ -391,11 +407,20 @@ void sbi_step_breakpoint(struct sbi_trap_regs *regs) {
 
 	unsigned long* regsidx = (unsigned long*) regs;
 
+	on_execute(epc);
+
 	size_t imm;
 	char* addr;
 	switch (OP(insn)) {
 		case OP_FENCE:
-			on_fence_dev();
+			switch(FUNCT3(insn)) {
+				case 0b000:
+					on_fence_dev();
+					break;
+				case 0b001:
+					on_fence_i();
+					break;
+			}
 			break;
 		case OP_LOAD:
 			imm = extract_imm(insn, IMM_I);
@@ -521,6 +546,10 @@ static void sbi_ecall_step_enable_at(uintptr_t addr) {
 	uintptr_t next = epcpa(addr);
 	// place breakpoint at EPC+4
 	place_breakpoint((uint32_t*) next);
+	if (ht_alloc(&fence_ht, 128) == -1) {
+		sbi_printf("ERROR: could not allocate fence hashtable\n");
+		sbi_hart_hang();
+	}
 
 	/* prev_mideleg = csr_read(CSR_MIDELEG); */
 	/* prev_medeleg = csr_read(CSR_MEDELEG); */
@@ -535,6 +564,7 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 		/* csr_write(CSR_MIDELEG, prev_mideleg); */
 		/* csr_write(CSR_MEDELEG, prev_medeleg); */
 	}
+	ht_free(&fence_ht);
 
     _sbi_step_enabled = 0;
 

@@ -1,4 +1,6 @@
 #include <sbi/sbi_step_ht.h>
+#include <sbi/sbi_console.h>
+#include <sbi/sbi_string.h>
 
 void* kr_malloc(size_t sz);
 void kr_free(void* p);
@@ -16,10 +18,10 @@ int ht_alloc(ht_t* tbl, size_t caphint) {
     tbl->cap = pow2ceil(caphint);
 
     tbl->entries = (ht_entry_t*) kr_malloc(tbl->cap * sizeof(ht_entry_t));
-	memset(tbl->entries, 0, sizeof(ht_entry_t) * tbl->cap);
-    if (tbl->entries == NULL) {
-        return -1;
-    }
+	if (tbl->entries == NULL) {
+		return -1;
+	}
+	sbi_memset(tbl->entries, 0, sizeof(ht_entry_t) * tbl->cap);
     return 0;
 }
 
@@ -46,16 +48,16 @@ ht_val_t ht_get(ht_t* tbl, ht_key_t key, bool* found) {
         *found = false;
 
     ht_val_t val;
-    memset(&val, 0, sizeof(ht_val_t));
+    sbi_memset(&val, 0, sizeof(ht_val_t));
     return val;
 }
 
 static int resize(ht_t* tbl, size_t newcap) {
     ht_entry_t* entries = (ht_entry_t*) kr_malloc(newcap * sizeof(ht_entry_t));
-	memset(entries, 0, sizeof(ht_entry_t) * newcap);
-    if (entries == NULL) {
-        return -1;
-    }
+	if (entries == NULL) {
+		return -1;
+	}
+	sbi_memset(entries, 0, sizeof(ht_entry_t) * newcap);
 
     ht_t newht = (ht_t){
         .cap = newcap,

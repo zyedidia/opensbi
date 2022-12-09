@@ -1,14 +1,12 @@
 #pragma once
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
+#include <sbi/sbi_types.h>
 
 // ---
 // redefine these values for custom types
 
-typedef uint32_t ht_key_t;
-typedef uint32_t ht_val_t;
+typedef uint64_t ht_key_t;
+typedef uint8_t ht_val_t;
 
 static inline uint64_t ht_hash(ht_key_t key) {
     key = ((key >> 16) ^ key) * 0x119de1f3;
