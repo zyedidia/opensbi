@@ -170,6 +170,11 @@ typedef enum {
 #define SHAMT(x) bits_get(x, 24, 20)
 #define FUNCT3(x) bits_get(x, 14, 12)
 #define FUNCT7(x) bits_get(x, 31, 25)
+#define CSR(x) bits_get(x, 31, 20)
+
+enum {
+	SATP_NUM = 0x180,
+};
 
 static uint64_t extract_imm(uint32_t insn, imm_type_t type) {
     switch (type) {
@@ -341,11 +346,48 @@ static void on_fence_dev() {
 	}
 }
 
-/* static void on_fence_vma() { */
-/*  */
-/* } */
+typedef struct {
+	char* addr;
+	size_t sz;
+	bool leaf;
+	bool global;
+	bool modified;
+} ptpage_t;
+
+typedef struct {
+	bool satp_written;
+	int slack;
+	unsigned nptpages;
+	ptpage_t* ptpages;
+} vma_status_t;
+
+static vma_status_t vma;
+
+static void on_fence_vma(unsigned rs1, unsigned rs2, struct sbi_trap_regs* regs) {
+	if (!OPT_SET(SS_VMAFENCE)) {
+		return;
+	}
+
+	vma.satp_written = false;
+}
+
+static void on_satp_write(ulong value) {
+	if (!OPT_SET(SS_VMAFENCE)) {
+		return;
+	}
+
+	vma.satp_written = true;
+
+	// parse and load new PT into vma status
+
+	// if new PT has different global mappings, then needs sfence with rs2 = x0,
+	// otherwise sfence with rs2 != x0 which contains value 0
+}
 
 static void on_load(char* addr, size_t sz) {
+	if (OPT_SET(SS_VMAFENCE)) {
+		// walk the address: make sure that each pt page touched is not modified
+	}
 	if (OPT_SET(SS_REGION)) {
 		region_t* r = dev_regions;
 		while (r) {
@@ -365,6 +407,13 @@ static void on_load(char* addr, size_t sz) {
 }
 
 static void on_store(char* addr, size_t sz) {
+	if (OPT_SET(SS_VMAFENCE)) {
+		// if modifying a ptpage: need to mark the modified page as modified
+		// if the page was leaf: modified-leaf
+		// if the page was global: modified-global
+		// walk the address
+	}
+
 	if (OPT_SET(SS_IFENCE)) {
 		if (ht_put(&fence_ht, (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
 			sbi_printf("ERROR: ifence checker ran out of memory\n");
@@ -402,6 +451,10 @@ static void on_store(char* addr, size_t sz) {
 static uint64_t equiv_hash = 0xdeadbeef;
 
 static void on_execute(char* addr, struct sbi_trap_regs* regs) {
+	if (OPT_SET(SS_VMAFENCE)) {
+		// walk the address
+	}
+
 	if (OPT_SET(SS_REGION)) {
 		region_t* r = noexec_regions;
 		while (r) {
@@ -462,6 +515,14 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 					break;
 			}
 			break;
+		case OP_SYS:
+			if (FUNCT7(insn) == 0b0001001 && FUNCT3(insn) == 0b000) {
+				on_fence_vma(RS1(insn), RS2(insn), regs);
+			}
+			if (FUNCT3(insn) == 0b001 && CSR(insn) == SATP_NUM) {
+				on_satp_write(regsidx[RS1(insn)]);
+			}
+			break;
 		case OP_LOAD:
 			imm = extract_imm(insn, IMM_I);
 			addr = (char*) (regsidx[RS1(insn)] + imm);
@@ -507,6 +568,14 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 					assert(0);
 			}
 			break;
+	}
+
+	if (vma.satp_written) {
+		if (vma.slack == 0) {
+			sbi_printf("ERROR: write to satp not followed by sfence.vma\n");
+			sbi_hart_hang();
+		}
+		vma.slack--;
 	}
 
 	// replace current breakpoint with orig bytes
