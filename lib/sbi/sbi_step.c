@@ -12,6 +12,9 @@
 #include <sbi/sbi_step_ht.h>
 #include <sbi/sbi_string.h>
 
+void* kr_malloc(unsigned nbytes);
+void kr_free(void* ptr);
+
 static void assert(int cond) {
 	if (!cond) {
 		sbi_printf("assertion failed\n");
@@ -75,13 +78,70 @@ typedef struct {
 	pte_t ptes[512];
 } pagetable_t;
 
+typedef struct ptestat {
+	char* addr;
+	bool modified;
+	struct ptestat* next;
+} ptestat_t;
+
+static ptestat_t* ptestats;
+
+static void free_ptestats() {
+	ptestat_t* p = ptestats;
+	ptestats = NULL;
+	while (p) {
+		ptestat_t* next = p->next;
+		p->next = NULL;
+		kr_free(p);
+		p = next;
+	}
+}
+
+static void load_pt_rec(pagetable_t* pt, pagetable_t* prev, bool modified) {
+	for (int i = 0; i < 512; i++) {
+		pte_t* pte = &pt->ptes[i];
+		if (!prev || ((uint64_t*)pt->ptes)[i] != ((uint64_t*)prev->ptes)[i]) {
+			ptestat_t* stat = (ptestat_t*) kr_malloc(sizeof(ptestat_t));
+			if (!stat) {
+				sbi_printf("ERROR: vmafence checker ran out of memory\n");
+				sbi_hart_hang();
+			}
+			stat->addr = (char*) pte;
+			stat->modified = modified;
+			stat->next = ptestats;
+			ptestats = stat;
+			if (pte->valid && !pte_leaf(pte)) {
+				load_pt_rec((pagetable_t*) pte_pa(&pt->ptes[i]), NULL, modified);
+			}
+		} else if (pte->valid && !pte_leaf(pte)) {
+			load_pt_rec((pagetable_t*) pte_pa(&pt->ptes[i]), (pagetable_t*) pte_pa(&prev->ptes[i]), modified);
+		}
+	}
+}
+
+static void load_pt(pagetable_t* pt, pagetable_t* prev, bool modified) {
+	free_ptestats();
+	load_pt_rec(pt, prev, modified);
+}
+
+static bool is_modified(char* addr) {
+	ptestat_t* p = ptestats;
+	while (p) {
+		if (p->addr == addr) {
+			return p->modified;
+		}
+		p = p->next;
+	}
+	return false;
+}
+
 // Returns the virtual page number of a va at a given pagetable level.
 static uintptr_t vpn(int level, uintptr_t va) {
 	return (va >> (12+9*level)) & ((1UL << 9) - 1);
 }
 
 // Converts a virtual address to physical address by walking the pagetable.
-static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed) {
+static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed, bool check) {
 	if (!pt) {
 		return va;
 	}
@@ -89,6 +149,10 @@ static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed) {
 	int endlevel = 0;
 	for (int level = 2; level > endlevel; level--) {
 		pte_t* pte = &pt->ptes[vpn(level, va)];
+		if (check && is_modified((char*) pte)) {
+			sbi_printf("ERROR: va %lx, accessing a dirty pagetable entry without sfence.vma\n", va);
+			sbi_hart_hang();
+		}
 		if (pte_leaf(pte)) {
 			return pte_va2pa(pte, level, va);
 		} else if (pte->valid) {
@@ -111,7 +175,7 @@ static pagetable_t* get_pt() {
 
 static uintptr_t epcpa(uintptr_t mepc) {
 	pagetable_t* pt = get_pt();
-	uintptr_t epc = va2pa(pt, mepc, NULL);
+	uintptr_t epc = va2pa(pt, mepc, NULL, false);
 	return epc;
 }
 
@@ -207,15 +271,12 @@ typedef struct region {
 	struct region* next;
 } region_t;
 
-region_t* dev_regions;
-region_t* dev_active;
+static region_t* dev_regions;
+static region_t* dev_active;
 
-region_t* rdonly_regions;
-region_t* noexec_regions;
-region_t* rdwr_regions;
-
-void* kr_malloc(unsigned nbytes);
-void kr_free(void* ptr);
+static region_t* rdonly_regions;
+static region_t* noexec_regions;
+static region_t* rdwr_regions;
 
 static void free_regions(region_t** regions) {
 	region_t* r = *regions;
@@ -346,29 +407,16 @@ static void on_fence_dev() {
 	}
 }
 
-typedef struct {
-	char* addr;
-	size_t sz;
-	bool leaf;
-	bool global;
-	bool modified;
-} ptpage_t;
-
-typedef struct {
-	bool satp_written;
-	int slack;
-	unsigned nptpages;
-	ptpage_t* ptpages;
-} vma_status_t;
-
-static vma_status_t vma;
-
 static void on_fence_vma(unsigned rs1, unsigned rs2, struct sbi_trap_regs* regs) {
 	if (!OPT_SET(SS_VMAFENCE)) {
 		return;
 	}
 
-	vma.satp_written = false;
+	ptestat_t* p = ptestats;
+	while (p) {
+		p->modified = false;
+		p = p->next;
+	}
 }
 
 static void on_satp_write(ulong value) {
@@ -376,17 +424,13 @@ static void on_satp_write(ulong value) {
 		return;
 	}
 
-	vma.satp_written = true;
-
-	// parse and load new PT into vma status
-
-	// if new PT has different global mappings, then needs sfence with rs2 = x0,
-	// otherwise sfence with rs2 != x0 which contains value 0
+	load_pt((pagetable_t*) (value << 12), get_pt(), true);
 }
 
 static void on_load(char* addr, size_t sz) {
 	if (OPT_SET(SS_VMAFENCE)) {
 		// walk the address: make sure that each pt page touched is not modified
+		va2pa(get_pt(), (uintptr_t) addr, NULL, true);
 	}
 	if (OPT_SET(SS_REGION)) {
 		region_t* r = dev_regions;
@@ -408,10 +452,18 @@ static void on_load(char* addr, size_t sz) {
 
 static void on_store(char* addr, size_t sz) {
 	if (OPT_SET(SS_VMAFENCE)) {
+		ptestat_t* p = ptestats;
 		// if modifying a ptpage: need to mark the modified page as modified
+		while (p) {
+			if (p->addr >= addr && p->addr < addr + sz) {
+				p->modified = true;
+			}
+			p = p->next;
+		}
 		// if the page was leaf: modified-leaf
 		// if the page was global: modified-global
 		// walk the address
+		va2pa(get_pt(), (uintptr_t) addr, NULL, true);
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
@@ -450,9 +502,10 @@ static void on_store(char* addr, size_t sz) {
 
 static uint64_t equiv_hash = 0xdeadbeef;
 
-static void on_execute(char* addr, struct sbi_trap_regs* regs) {
+static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 	if (OPT_SET(SS_VMAFENCE)) {
 		// walk the address
+		va2pa(get_pt(), (uintptr_t) va, NULL, true);
 	}
 
 	if (OPT_SET(SS_REGION)) {
@@ -500,7 +553,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 
 	unsigned long* regsidx = (unsigned long*) regs;
 
-	on_execute((char*) epc, regs);
+	on_execute((char*) regs->mepc, (char*) epc, regs);
 
 	size_t imm;
 	char* addr;
@@ -570,14 +623,6 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 			break;
 	}
 
-	if (vma.satp_written) {
-		if (vma.slack == 0) {
-			sbi_printf("ERROR: write to satp not followed by sfence.vma\n");
-			sbi_hart_hang();
-		}
-		vma.slack--;
-	}
-
 	// replace current breakpoint with orig bytes
 	*brkpt = insn;
 	RISCV_FENCE_I;
@@ -645,7 +690,7 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 					nextva = regs->mepc + 4;
 			}
 	}
-	uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL);
+	uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL, false);
 	/* sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next); */
 
 	// place breakpoint there
@@ -664,6 +709,10 @@ static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 			sbi_printf("ERROR: could not allocate fence hashtable\n");
 			sbi_hart_hang();
 		}
+	}
+
+	if (OPT_SET(SS_VMAFENCE)) {
+		load_pt(get_pt(), NULL, false);
 	}
 }
 
