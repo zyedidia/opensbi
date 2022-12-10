@@ -101,6 +101,9 @@ static void load_pt_rec(pagetable_t* pt, pagetable_t* prev, bool modified) {
 	for (int i = 0; i < 512; i++) {
 		pte_t* pte = &pt->ptes[i];
 		if (!prev || ((uint64_t*)pt->ptes)[i] != ((uint64_t*)prev->ptes)[i]) {
+			if (!pte->valid) {
+				continue;
+			}
 			ptestat_t* stat = (ptestat_t*) kr_malloc(sizeof(ptestat_t));
 			if (!stat) {
 				sbi_printf("ERROR: vmafence checker ran out of memory\n");
@@ -108,6 +111,10 @@ static void load_pt_rec(pagetable_t* pt, pagetable_t* prev, bool modified) {
 			}
 			stat->addr = (char*) pte;
 			stat->modified = modified;
+			if (pte_leaf(pte) && (!pte->accessed || !pte->dirty)) {
+				sbi_printf("ERROR: accessed/dirty bits were not set in leaf PTE\n");
+				sbi_hart_hang();
+			}
 			stat->next = ptestats;
 			ptestats = stat;
 			if (pte->valid && !pte_leaf(pte)) {
@@ -455,13 +462,17 @@ static void on_load(char* addr, size_t sz) {
 	}
 }
 
-static void on_store(char* addr, size_t sz) {
+static void on_store(char* addr, size_t sz, uint64_t stval) {
 	if (OPT_SET(SS_VMAFENCE)) {
 		ptestat_t* p = ptestats;
 		// if modifying a ptpage: need to mark the modified page as modified
 		while (p) {
 			if (p->addr >= addr && p->addr < addr + sz) {
 				p->modified = true;
+				if (!bit_get(stval, 7) || !bit_get(stval, 6)) {
+					sbi_printf("ERROR: accessed/dirty bits were not set in PTE\n");
+					sbi_hart_hang();
+				}
 			}
 			p = p->next;
 		}
@@ -548,6 +559,7 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 // address the instruction will jump to next (by partially evaluting the
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
+	/* sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL)); */
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 
 	if ((uint32_t*) regs->mepc != brkpt) {
@@ -609,19 +621,20 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 		case OP_STORE:
 			imm = extract_imm(insn, IMM_S);
 			addr = (char*) (regsidx[RS1(insn)] + imm);
+			uint64_t stval = regsidx[RS2(insn)];
 
 			switch (FUNCT3(insn)) {
 				case EXT_BYTE:
-					on_store(addr, 1);
+					on_store(addr, 1, stval);
 					break;
 				case EXT_HALF:
-					on_store(addr, 2);
+					on_store(addr, 2, stval);
 					break;
 				case EXT_WORD:
-					on_store(addr, 4);
+					on_store(addr, 4, stval);
 					break;
 				case EXT_DWORD:
-					on_store(addr, 8);
+					on_store(addr, 8, stval);
 					break;
 				default:
 					assert(0);
