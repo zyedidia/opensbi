@@ -180,7 +180,7 @@ static uintptr_t epcpa(uintptr_t mepc) {
 }
 
 static uint32_t* brkpt;
-static uint32_t insn;
+/* static uint32_t insn; */
 
 enum {
 	INSN_ECALL = 0x00000073,
@@ -189,10 +189,15 @@ enum {
 };
 
 static void place_breakpoint(uint32_t* loc) {
-	insn = *loc;
 	brkpt = loc;
-	*brkpt = INSN_EBREAK;
-	RISCV_FENCE_I;
+	csr_write(CSR_TSELECT, 0);
+	csr_write(CSR_TDATA1, 0b011100);
+	csr_write(CSR_TDATA2, loc);
+
+	/* insn = *loc; */
+	/* brkpt = loc; */
+	/* *brkpt = INSN_EBREAK; */
+	/* RISCV_FENCE_I; */
 }
 
 typedef enum {
@@ -544,12 +549,13 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
-	/* sbi_printf("sbi_step_breakpoint, epc: %p\n", epc); */
 
-	if (epc != brkpt) {
+	if ((uint32_t*) regs->mepc != brkpt) {
 		sbi_printf("ERROR: epc != brkpt\n");
 		while (1) {}
 	}
+
+	uint32_t insn = *epc;
 
 	unsigned long* regsidx = (unsigned long*) regs;
 
@@ -624,10 +630,8 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	}
 
 	// replace current breakpoint with orig bytes
-	*brkpt = insn;
-	RISCV_FENCE_I;
-
-	pagetable_t* pt = get_pt();
+	/* *brkpt = insn; */
+	/* RISCV_FENCE_I; */
 
 	// decode instruction to decide where to jump next
 	uintptr_t nextva;
@@ -690,19 +694,18 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 					nextva = regs->mepc + 4;
 			}
 	}
-	uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL, false);
+	/* uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL, false); */
 	/* sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next); */
 
 	// place breakpoint there
-	place_breakpoint(next);
+	place_breakpoint((uint32_t*) nextva);
 }
 
 static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 	_sbi_step_enabled = 1;
 	_sbi_flags = flags;
-	uintptr_t next = epcpa(addr);
 	// place breakpoint at EPC+4
-	place_breakpoint((uint32_t*) next);
+	place_breakpoint((uint32_t*) addr);
 
 	if (OPT_SET(SS_IFENCE)) {
 		if (ht_alloc(&fence_ht, 128) == -1) {
@@ -719,7 +722,8 @@ static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	// remove breakpoint
 	if (_sbi_step_enabled) {
-		*brkpt = insn;
+		csr_write(CSR_TDATA1, 0);
+		/* *brkpt = insn; */
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
@@ -736,7 +740,7 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 
     _sbi_step_enabled = 0;
 
-	RISCV_FENCE_I;
+	/* RISCV_FENCE_I; */
 }
 
 static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
