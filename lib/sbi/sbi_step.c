@@ -288,7 +288,6 @@ static region_t* dev_active;
 
 static region_t* rdonly_regions;
 static region_t* noexec_regions;
-static region_t* rdwr_regions;
 
 static void free_regions(region_t** regions) {
 	region_t* r = *regions;
@@ -308,7 +307,13 @@ typedef struct {
 	bool active;
 } heap_t;
 
-heap_t heap;
+static char heap_data[1024 * 16];
+heap_t heap = (heap_t){
+	.start = heap_data,
+	.brk = heap_data,
+	.sz = sizeof(heap_data),
+	.active = true,
+};
 
 #define roundup(x,n) (((x)+((n)-1))&(~((n)-1)))
 
@@ -404,6 +409,7 @@ void kr_free(void* ap) {
 }
 
 ht_t fence_ht;
+ht_t mem_ht;
 
 static void on_fence_i() {
 	if (OPT_SET(SS_IFENCE)) {
@@ -460,6 +466,20 @@ static void on_load(char* addr, size_t sz) {
 			r = r->next;
 		}
 	}
+	if (OPT_SET(SS_MEM)) {
+		bool found;
+		for (int i = 0; i < mem_ht.len; i++) {
+			ht_entry_t* ent = &mem_ht.entries[i];
+			if (ent->filled && addr >= (char*) ent->key && addr < (char*) ent->key + ent->val) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			sbi_printf("ERROR: load from unallocated region\n");
+			sbi_hart_hang();
+		}
+	}
 }
 
 static void on_store(char* addr, size_t sz, uint64_t stval) {
@@ -514,6 +534,21 @@ static void on_store(char* addr, size_t sz, uint64_t stval) {
 			r = r->next;
 		}
 	}
+
+	if (OPT_SET(SS_MEM)) {
+		bool found = false;
+		for (int i = 0; i < mem_ht.cap; i++) {
+			ht_entry_t* ent = &mem_ht.entries[i];
+			if (ent->filled && addr >= (char*) ent->key && addr < (char*) ent->key + ent->val) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			sbi_printf("ERROR: store to unallocated region %p\n", addr);
+			sbi_hart_hang();
+		}
+	}
 }
 
 static uint64_t equiv_hash = 0xdeadbeef;
@@ -549,7 +584,6 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 			hash = ht_hash(hash ^ regsidx[i]);
 		}
 		equiv_hash = hash;
-		sbi_printf("%lx\n", equiv_hash);
 	}
 }
 
@@ -748,7 +782,6 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 		dev_active = NULL;
 		free_regions(&rdonly_regions);
 		free_regions(&noexec_regions);
-		free_regions(&rdwr_regions);
 	}
 
     _sbi_step_enabled = 0;
@@ -757,12 +790,12 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 }
 
 static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
-	heap = (heap_t){
-		.active = true,
-		.start = (char*) heap_start,
-		.brk = (char*) heap_start,
-		.sz = sz,
-	};
+	/* heap = (heap_t){ */
+	/* 	.active = true, */
+	/* 	.start = (char*) heap_start, */
+	/* 	.brk = (char*) heap_start, */
+	/* 	.sz = sz, */
+	/* }; */
 }
 
 static void sbi_ecall_step_mark_region(void* start, size_t sz, unsigned flags) {
@@ -787,17 +820,33 @@ static void sbi_ecall_step_mark_region(void* start, size_t sz, unsigned flags) {
 		r->sz = sz;
 		noexec_regions = r;
 	}
-	if (FLAG_SET(flags, SS_REGION_RDWR)) {
-		region_t* r = (region_t*) kr_malloc(sizeof(region_t));
-		r->next = rdwr_regions;
-		r->start = start;
-		r->sz = sz;
-		rdwr_regions = r;
+	if (!mem_ht.entries) {
+		if (ht_alloc(&mem_ht, 128) == -1) {
+			sbi_printf("ERROR: could not allocate memory hashtable\n");
+			sbi_hart_hang();
+		}
+	}
+	if (ht_put(&mem_ht, (uint64_t) start, (uint64_t) sz) == -1) {
+		sbi_printf("ERROR: could not allocate memory for memory checker\n");
+		sbi_hart_hang();
 	}
 }
 
-static void sbi_ecall_step_mem_alloc(void* ptr, size_t sz) {}
-static void sbi_ecall_step_mem_free(void* ptr) {}
+static void sbi_ecall_step_mem_alloc(void* ptr, size_t sz) {
+	if (!mem_ht.entries) {
+		if (ht_alloc(&mem_ht, 128) == -1) {
+			sbi_printf("ERROR: could not allocate memory hashtable\n");
+			sbi_hart_hang();
+		}
+	}
+	if (ht_put(&mem_ht, (uint64_t) ptr, (uint64_t) sz) == -1) {
+		sbi_printf("ERROR: could not allocate memory for memory checker\n");
+		sbi_hart_hang();
+	}
+}
+static void sbi_ecall_step_mem_free(void* ptr) {
+	ht_remove(&mem_ht, (uint64_t) ptr);
+}
 
 static int sbi_ecall_step_equiv_hash() {
 	return equiv_hash;
