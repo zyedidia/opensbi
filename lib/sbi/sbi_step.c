@@ -205,17 +205,18 @@ static void place_breakpoint(uint32_t* loc) {
 
 static void place_breakpoint_mismatch(uint32_t* loc) {
 	brkpt = loc;
+	sbi_printf("breakpoint set to %p\n", loc);
 	csr_write(CSR_TSELECT, 0);
 	unsigned mcontrol = 0b011100;
-	bits_set(mcontrol, 15, 12, 2);
+	bits_set(mcontrol, 10, 7, 2);
 	csr_write(CSR_TDATA1, mcontrol);
 	csr_write(CSR_TDATA2, (uintptr_t) loc + 4);
 
 	csr_write(CSR_TSELECT, 1);
 	mcontrol = 0b011100;
-	bits_set(mcontrol, 15, 12, 3);
+	bits_set(mcontrol, 10, 7, 3);
 	csr_write(CSR_TDATA1, mcontrol);
-	csr_write(CSR_TDATA2, loc);
+	csr_write(CSR_TDATA2, (uintptr_t) loc);
 
 	/* insn = *loc; */
 	/* brkpt = loc; */
@@ -612,10 +613,10 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL));
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 
-	if ((uint32_t*) regs->mepc != brkpt) {
-		sbi_printf("ERROR: epc != brkpt\n");
-		while (1) {}
-	}
+	/* if ((uint32_t*) regs->mepc != brkpt) { */
+	/* 	sbi_printf("ERROR: epc != brkpt\n"); */
+	/* 	while (1) {} */
+	/* } */
 
 	uint32_t insn = *epc;
 
