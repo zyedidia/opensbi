@@ -205,7 +205,6 @@ static void place_breakpoint(uint32_t* loc) {
 
 static void place_breakpoint_mismatch(uint32_t* loc) {
 	brkpt = loc;
-	sbi_printf("breakpoint mismatch set to %p\n", loc);
 	csr_write(CSR_TSELECT, 0);
 	unsigned mcontrol = 0b011100;
 	mcontrol = bits_set(mcontrol, 10, 7, 2);
@@ -610,7 +609,7 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 // address the instruction will jump to next (by partially evaluting the
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
-	sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL));
+	/* sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL)); */
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 
 	/* if ((uint32_t*) regs->mepc != brkpt) { */
@@ -788,6 +787,9 @@ static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	// remove breakpoint
 	if (_sbi_step_enabled) {
+		csr_write(CSR_TSELECT, 0);
+		csr_write(CSR_TDATA1, 0);
+		csr_write(CSR_TSELECT, 1);
 		csr_write(CSR_TDATA1, 0);
 		/* *brkpt = insn; */
 	}
