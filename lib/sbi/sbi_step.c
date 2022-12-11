@@ -198,7 +198,23 @@ enum {
 static void place_breakpoint(uint32_t* loc) {
 	brkpt = loc;
 	csr_write(CSR_TSELECT, 0);
-	csr_write(CSR_TDATA1, 0b011100);
+	unsigned mcontrol = 0b011100;
+	csr_write(CSR_TDATA1, mcontrol);
+	csr_write(CSR_TDATA2, loc);
+}
+
+static void place_breakpoint_mismatch(uint32_t* loc) {
+	brkpt = loc;
+	csr_write(CSR_TSELECT, 0);
+	unsigned mcontrol = 0b011100;
+	bits_set(mcontrol, 15, 12, 2);
+	csr_write(CSR_TDATA1, mcontrol);
+	csr_write(CSR_TDATA2, (uintptr_t) loc + 4);
+
+	csr_write(CSR_TSELECT, 1);
+	mcontrol = 0b011100;
+	bits_set(mcontrol, 15, 12, 3);
+	csr_write(CSR_TDATA1, mcontrol);
 	csr_write(CSR_TDATA2, loc);
 
 	/* insn = *loc; */
@@ -593,7 +609,7 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 // address the instruction will jump to next (by partially evaluting the
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
-	/* sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL)); */
+	sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL));
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 
 	if ((uint32_t*) regs->mepc != brkpt) {
@@ -681,71 +697,73 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	/* RISCV_FENCE_I; */
 
 	// decode instruction to decide where to jump next
-	uintptr_t nextva;
-	switch (OP(insn)) {
-		case OP_JAL:
-			nextva = regs->mepc + extract_imm(insn, IMM_J);
-			break;
-		case OP_JALR:
-			nextva = regsidx[RS1(insn)] + extract_imm(insn, IMM_I);
-			break;
-		case OP_BRANCH:;
-			uintptr_t res = 0;
-			switch (FUNCT3(insn)) {
-				case 0b000:
-				case 0b001:
-					res = regsidx[RS1(insn)] ^ regsidx[RS2(insn)];
-					break;
-				case 0b100:
-				case 0b101:
-					res = (intptr_t)regsidx[RS1(insn)] < (intptr_t)regsidx[RS2(insn)];
-					break;
-				case 0b110:
-				case 0b111:
-					res = regsidx[RS1(insn)] < regsidx[RS2(insn)];
-					break;
-			}
-			int cond = false;
-			switch (FUNCT3(insn)) {
-				case 0b000:
-				case 0b101:
-				case 0b111:
-					cond = res == 0;
-					break;
-				case 0b001:
-				case 0b100:
-				case 0b110:
-					cond = res != 0;
-					break;
-			}
-			if (cond) {
-				nextva = regs->mepc + extract_imm(insn, IMM_B);
-			} else {
-				nextva = regs->mepc + 4;
-			}
-			break;
-		default:
-			switch (insn) {
-				case INSN_SRET:
-					nextva = csr_read(CSR_SEPC);
-					break;
-				case INSN_ECALL:
-					if (OPT_SET(SS_NOSTEP_ECALL)) {
-						// user does not want to single step the ecall handler
-						nextva = regs->mepc + 4;
-					} else {
-						nextva = csr_read(CSR_STVEC);
-					}
-					break;
-				default:
-					nextva = regs->mepc + 4;
-			}
-	}
+	/* uintptr_t nextva; */
+	/* switch (OP(insn)) { */
+	/* 	case OP_JAL: */
+	/* 		nextva = regs->mepc + extract_imm(insn, IMM_J); */
+	/* 		break; */
+	/* 	case OP_JALR: */
+	/* 		nextva = regsidx[RS1(insn)] + extract_imm(insn, IMM_I); */
+	/* 		break; */
+	/* 	case OP_BRANCH:; */
+	/* 		uintptr_t res = 0; */
+	/* 		switch (FUNCT3(insn)) { */
+	/* 			case 0b000: */
+	/* 			case 0b001: */
+	/* 				res = regsidx[RS1(insn)] ^ regsidx[RS2(insn)]; */
+	/* 				break; */
+	/* 			case 0b100: */
+	/* 			case 0b101: */
+	/* 				res = (intptr_t)regsidx[RS1(insn)] < (intptr_t)regsidx[RS2(insn)]; */
+	/* 				break; */
+	/* 			case 0b110: */
+	/* 			case 0b111: */
+	/* 				res = regsidx[RS1(insn)] < regsidx[RS2(insn)]; */
+	/* 				break; */
+	/* 		} */
+	/* 		int cond = false; */
+	/* 		switch (FUNCT3(insn)) { */
+	/* 			case 0b000: */
+	/* 			case 0b101: */
+	/* 			case 0b111: */
+	/* 				cond = res == 0; */
+	/* 				break; */
+	/* 			case 0b001: */
+	/* 			case 0b100: */
+	/* 			case 0b110: */
+	/* 				cond = res != 0; */
+	/* 				break; */
+	/* 		} */
+	/* 		if (cond) { */
+	/* 			nextva = regs->mepc + extract_imm(insn, IMM_B); */
+	/* 		} else { */
+	/* 			nextva = regs->mepc + 4; */
+	/* 		} */
+	/* 		break; */
+	/* 	default: */
+	/* 		switch (insn) { */
+	/* 			case INSN_SRET: */
+	/* 				nextva = csr_read(CSR_SEPC); */
+	/* 				break; */
+	/* 			case INSN_ECALL: */
+	/* 				if (OPT_SET(SS_NOSTEP_ECALL)) { */
+	/* 					// user does not want to single step the ecall handler */
+	/* 					nextva = regs->mepc + 4; */
+	/* 				} else { */
+	/* 					nextva = csr_read(CSR_STVEC); */
+	/* 				} */
+	/* 				break; */
+	/* 			default: */
+	/* 				nextva = regs->mepc + 4; */
+	/* 		} */
+	/* } */
 	/* uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL, false); */
 	/* sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next); */
 
 	// place breakpoint there
-	place_breakpoint((uint32_t*) nextva);
+	/* place_breakpoint((uint32_t*) nextva); */
+
+	place_breakpoint_mismatch((uint32_t*) regs->mepc);
 }
 
 static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
