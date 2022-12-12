@@ -186,9 +186,6 @@ static uintptr_t epcpa(uintptr_t mepc) {
 	return epc;
 }
 
-static uint32_t* brkpt;
-/* static uint32_t insn; */
-
 enum {
 	INSN_ECALL = 0x00000073,
 	INSN_EBREAK = 0x00100073,
@@ -216,11 +213,6 @@ static void place_breakpoint_mismatch(uint32_t* loc) {
 	mcontrol = bits_set(mcontrol, 10, 7, 3);
 	csr_write(CSR_TDATA1, mcontrol);
 	csr_write(CSR_TDATA2, (uintptr_t) loc);
-
-	/* insn = *loc; */
-	/* brkpt = loc; */
-	/* *brkpt = INSN_EBREAK; */
-	/* RISCV_FENCE_I; */
 }
 
 typedef enum {
@@ -330,99 +322,6 @@ heap_t heap = (heap_t){
 	.sz = sizeof(heap_data),
 	.active = true,
 };
-
-#define roundup(x,n) (((x)+((n)-1))&(~((n)-1)))
-
-union align {
-	double d;
-	void *p;
-	void (*fp)(void);
-};
-
-typedef union header { /* block header */
-	struct {
-		union header *ptr; /* next block if on free list */
-		unsigned size; /* size of this block */
-	} s;
-	union align x; /* force alignment of blocks */
-} header_t;
-
-static header_t base; /* empty list to get started */
-static header_t *freep = NULL; /* start of free list */
-
-void* sbrk(size_t increment) {
-	if (heap.brk >= heap.start + heap.sz) {
-		return NULL;
-	}
-	void* p = heap.brk;
-	heap.brk += increment;
-	return p;
-}
-
-#define NALLOC 1024 /* minimum #units to request */
-/* morecore: ask system for more memory */
-static header_t* morecore(unsigned nu) {
-	if (!heap.active)
-		return NULL;
-	char *cp;
-	header_t *up;
-	if (nu < NALLOC)
-		nu = NALLOC;
-	cp = sbrk(nu * sizeof(header_t));
-	if (cp == NULL) /* no space at all */
-		return NULL;
-	up = (header_t *) cp;
-	up->s.size = nu;
-	kr_free((void *)(up+1));
-	return freep;
-}
-
-void* kr_malloc(unsigned nbytes) {
-	header_t *p, *prevp;
-	header_t *morecore(unsigned);
-	unsigned nunits;
-	nunits = (nbytes+sizeof(header_t)-1)/sizeof(header_t) + 1;
-	if ((prevp = freep) == NULL) { /* no free list yet */
-		base.s.ptr = freep = prevp = &base;
-		base.s.size = 0;
-	}
-	for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {
-		if (p->s.size >= nunits) { /* big enough */
-			if (p->s.size == nunits) /* exactly */
-				prevp->s.ptr = p->s.ptr;
-			else { /* allocate tail end */
-				p->s.size -= nunits;
-				p += p->s.size;
-				p->s.size = nunits;
-			}
-			freep = prevp;
-			return (void *)(p+1);
-		}
-		if (p == freep) /* wrapped around free list */
-			if ((p = morecore(nunits)) == NULL)
-				return NULL; /* none left */
-	}
-}
-
-/* free: put block ap in free list */
-void kr_free(void* ap) {
-	header_t *bp, *p;
-	bp = (header_t *)ap - 1; /* point to block header */
-	for (p = freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr)
-		if (p >= p->s.ptr && (bp > p || bp < p->s.ptr))
-			break; /* freed block at start or end of arena */
-	if (bp + bp->s.size == p->s.ptr) { /* join to upper nbr */
-		bp->s.size += p->s.ptr->s.size;
-		bp->s.ptr = p->s.ptr->s.ptr;
-	} else
-		bp->s.ptr = p->s.ptr;
-	if (p + p->s.size == bp) { /* join to lower nbr */
-		p->s.size += bp->s.size;
-		p->s.ptr = bp->s.ptr;
-	} else
-		p->s.ptr = bp;
-	freep = p;
-}
 
 ht_t fence_ht;
 ht_t mem_ht;
@@ -612,11 +511,6 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	/* sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL)); */
 	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
 
-	/* if ((uint32_t*) regs->mepc != brkpt) { */
-	/* 	sbi_printf("ERROR: epc != brkpt\n"); */
-	/* 	while (1) {} */
-	/* } */
-
 	uint32_t insn = *epc;
 
 	unsigned long* regsidx = (unsigned long*) regs;
@@ -692,77 +586,6 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 			break;
 	}
 
-	// replace current breakpoint with orig bytes
-	/* *brkpt = insn; */
-	/* RISCV_FENCE_I; */
-
-	// decode instruction to decide where to jump next
-	/* uintptr_t nextva; */
-	/* switch (OP(insn)) { */
-	/* 	case OP_JAL: */
-	/* 		nextva = regs->mepc + extract_imm(insn, IMM_J); */
-	/* 		break; */
-	/* 	case OP_JALR: */
-	/* 		nextva = regsidx[RS1(insn)] + extract_imm(insn, IMM_I); */
-	/* 		break; */
-	/* 	case OP_BRANCH:; */
-	/* 		uintptr_t res = 0; */
-	/* 		switch (FUNCT3(insn)) { */
-	/* 			case 0b000: */
-	/* 			case 0b001: */
-	/* 				res = regsidx[RS1(insn)] ^ regsidx[RS2(insn)]; */
-	/* 				break; */
-	/* 			case 0b100: */
-	/* 			case 0b101: */
-	/* 				res = (intptr_t)regsidx[RS1(insn)] < (intptr_t)regsidx[RS2(insn)]; */
-	/* 				break; */
-	/* 			case 0b110: */
-	/* 			case 0b111: */
-	/* 				res = regsidx[RS1(insn)] < regsidx[RS2(insn)]; */
-	/* 				break; */
-	/* 		} */
-	/* 		int cond = false; */
-	/* 		switch (FUNCT3(insn)) { */
-	/* 			case 0b000: */
-	/* 			case 0b101: */
-	/* 			case 0b111: */
-	/* 				cond = res == 0; */
-	/* 				break; */
-	/* 			case 0b001: */
-	/* 			case 0b100: */
-	/* 			case 0b110: */
-	/* 				cond = res != 0; */
-	/* 				break; */
-	/* 		} */
-	/* 		if (cond) { */
-	/* 			nextva = regs->mepc + extract_imm(insn, IMM_B); */
-	/* 		} else { */
-	/* 			nextva = regs->mepc + 4; */
-	/* 		} */
-	/* 		break; */
-	/* 	default: */
-	/* 		switch (insn) { */
-	/* 			case INSN_SRET: */
-	/* 				nextva = csr_read(CSR_SEPC); */
-	/* 				break; */
-	/* 			case INSN_ECALL: */
-	/* 				if (OPT_SET(SS_NOSTEP_ECALL)) { */
-	/* 					// user does not want to single step the ecall handler */
-	/* 					nextva = regs->mepc + 4; */
-	/* 				} else { */
-	/* 					nextva = csr_read(CSR_STVEC); */
-	/* 				} */
-	/* 				break; */
-	/* 			default: */
-	/* 				nextva = regs->mepc + 4; */
-	/* 		} */
-	/* } */
-	/* uint32_t* next = (uint32_t*) va2pa(pt, nextva, NULL, false); */
-	/* sbi_printf("nextva: %lx, nextpa: %p\n", nextva, next); */
-
-	// place breakpoint there
-	/* place_breakpoint((uint32_t*) nextva); */
-
 	place_breakpoint_mismatch((uint32_t*) regs->mepc);
 }
 
@@ -808,15 +631,6 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
     _sbi_step_enabled = 0;
 
 	/* RISCV_FENCE_I; */
-}
-
-static void sbi_ecall_step_set_heap(void* heap_start, size_t sz) {
-	/* heap = (heap_t){ */
-	/* 	.active = true, */
-	/* 	.start = (char*) heap_start, */
-	/* 	.brk = (char*) heap_start, */
-	/* 	.sz = sz, */
-	/* }; */
 }
 
 static void sbi_ecall_step_mark_region(void* start, size_t sz, unsigned flags) {
@@ -887,9 +701,6 @@ static int sbi_ecall_step_handler(unsigned long extid, unsigned long funcid, con
 			break;
 		case SBI_EXT_STEP_DISABLE:
 			sbi_ecall_step_disable(regs);
-			break;
-		case SBI_EXT_STEP_SET_HEAP:
-			sbi_ecall_step_set_heap((void*) regs->a0, (size_t) regs->a1);
 			break;
 		case SBI_EXT_STEP_MEM_ALLOC:
 			sbi_ecall_step_mem_alloc((void*) regs->a0, (size_t) regs->a1);
