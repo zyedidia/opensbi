@@ -176,7 +176,7 @@ static uintptr_t va2pa(pagetable_t* pt, uintptr_t va, int* failed, bool check) {
 // Gets the currently active pagetable.
 static pagetable_t* get_pt() {
 	uintptr_t satp = csr_read(CSR_SATP);
-	assert((satp >> 60) == 8);
+	/* assert((satp >> 60) == 8); */
 	return (pagetable_t*) (satp << 12);
 }
 
@@ -193,7 +193,6 @@ enum {
 };
 
 static void place_breakpoint(uint32_t* loc) {
-	brkpt = loc;
 	csr_write(CSR_TSELECT, 0);
 	unsigned mcontrol = 0b011100;
 	csr_write(CSR_TDATA1, mcontrol);
@@ -201,7 +200,6 @@ static void place_breakpoint(uint32_t* loc) {
 }
 
 static void place_breakpoint_mismatch(uint32_t* loc) {
-	brkpt = loc;
 	csr_write(CSR_TSELECT, 0);
 	unsigned mcontrol = 0b011100;
 	mcontrol = bits_set(mcontrol, 10, 7, 2);
@@ -614,7 +612,6 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 		csr_write(CSR_TDATA1, 0);
 		csr_write(CSR_TSELECT, 1);
 		csr_write(CSR_TDATA1, 0);
-		/* *brkpt = insn; */
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
