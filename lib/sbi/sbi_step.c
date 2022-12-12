@@ -507,82 +507,82 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 // instruction), and put the breakpoint there.
 void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	/* sbi_printf("sbi_step_breakpoint, epc: %lx, mtval: %lx\n", regs->mepc, csr_read(CSR_MTVAL)); */
-	uint32_t* epc = (uint32_t*) epcpa(regs->mepc);
-
-	uint32_t insn = *epc;
-
-	unsigned long* regsidx = (unsigned long*) regs;
-
-	on_execute((char*) regs->mepc, (char*) epc, regs);
-
-	size_t imm;
-	char* addr;
-	switch (OP(insn)) {
-		case OP_FENCE:
-			switch(FUNCT3(insn)) {
-				case 0b000:
-					on_fence_dev();
-					break;
-				case 0b001:
-					on_fence_i();
-					break;
-			}
-			break;
-		case OP_SYS:
-			if (FUNCT7(insn) == 0b0001001 && FUNCT3(insn) == 0b000) {
-				on_fence_vma(RS1(insn), RS2(insn), regs);
-			}
-			if (FUNCT3(insn) == 0b001 && CSR(insn) == SATP_NUM) {
-				on_satp_write(regsidx[RS1(insn)]);
-			}
-			break;
-		case OP_LOAD:
-			imm = extract_imm(insn, IMM_I);
-			addr = (char*) (regsidx[RS1(insn)] + imm);
-
-			switch (FUNCT3(insn)) {
-				case EXT_BYTEU:
-				case EXT_BYTE:
-					on_load(addr, 1);
-					break;
-				case EXT_HALFU:
-				case EXT_HALF:
-					on_load(addr, 2);
-					break;
-				case EXT_WORDU:
-				case EXT_WORD:
-					on_load(addr, 4);
-					break;
-				case EXT_DWORD:
-					on_load(addr, 8);
-					break;
-				default:
-					assert(0);
-			}
-			break;
-		case OP_STORE:
-			imm = extract_imm(insn, IMM_S);
-			addr = (char*) (regsidx[RS1(insn)] + imm);
-			uint64_t stval = regsidx[RS2(insn)];
-
-			switch (FUNCT3(insn)) {
-				case EXT_BYTE:
-					on_store(addr, 1, stval);
-					break;
-				case EXT_HALF:
-					on_store(addr, 2, stval);
-					break;
-				case EXT_WORD:
-					on_store(addr, 4, stval);
-					break;
-				case EXT_DWORD:
-					on_store(addr, 8, stval);
-					break;
-				default:
-					assert(0);
-			}
-			break;
-	}
+	/* uint32_t* epc = (uint32_t*) epcpa(regs->mepc); */
+    /*  */
+	/* uint32_t insn = *epc; */
+    /*  */
+	/* unsigned long* regsidx = (unsigned long*) regs; */
+    /*  */
+	/* on_execute((char*) regs->mepc, (char*) epc, regs); */
+    /*  */
+	/* size_t imm; */
+	/* char* addr; */
+	/* switch (OP(insn)) { */
+	/* 	case OP_FENCE: */
+	/* 		switch(FUNCT3(insn)) { */
+	/* 			case 0b000: */
+	/* 				on_fence_dev(); */
+	/* 				break; */
+	/* 			case 0b001: */
+	/* 				on_fence_i(); */
+	/* 				break; */
+	/* 		} */
+	/* 		break; */
+	/* 	case OP_SYS: */
+	/* 		if (FUNCT7(insn) == 0b0001001 && FUNCT3(insn) == 0b000) { */
+	/* 			on_fence_vma(RS1(insn), RS2(insn), regs); */
+	/* 		} */
+	/* 		if (FUNCT3(insn) == 0b001 && CSR(insn) == SATP_NUM) { */
+	/* 			on_satp_write(regsidx[RS1(insn)]); */
+	/* 		} */
+	/* 		break; */
+	/* 	case OP_LOAD: */
+	/* 		imm = extract_imm(insn, IMM_I); */
+	/* 		addr = (char*) (regsidx[RS1(insn)] + imm); */
+    /*  */
+	/* 		switch (FUNCT3(insn)) { */
+	/* 			case EXT_BYTEU: */
+	/* 			case EXT_BYTE: */
+	/* 				on_load(addr, 1); */
+	/* 				break; */
+	/* 			case EXT_HALFU: */
+	/* 			case EXT_HALF: */
+	/* 				on_load(addr, 2); */
+	/* 				break; */
+	/* 			case EXT_WORDU: */
+	/* 			case EXT_WORD: */
+	/* 				on_load(addr, 4); */
+	/* 				break; */
+	/* 			case EXT_DWORD: */
+	/* 				on_load(addr, 8); */
+	/* 				break; */
+	/* 			default: */
+	/* 				assert(0); */
+	/* 		} */
+	/* 		break; */
+	/* 	case OP_STORE: */
+	/* 		imm = extract_imm(insn, IMM_S); */
+	/* 		addr = (char*) (regsidx[RS1(insn)] + imm); */
+	/* 		uint64_t stval = regsidx[RS2(insn)]; */
+    /*  */
+	/* 		switch (FUNCT3(insn)) { */
+	/* 			case EXT_BYTE: */
+	/* 				on_store(addr, 1, stval); */
+	/* 				break; */
+	/* 			case EXT_HALF: */
+	/* 				on_store(addr, 2, stval); */
+	/* 				break; */
+	/* 			case EXT_WORD: */
+	/* 				on_store(addr, 4, stval); */
+	/* 				break; */
+	/* 			case EXT_DWORD: */
+	/* 				on_store(addr, 8, stval); */
+	/* 				break; */
+	/* 			default: */
+	/* 				assert(0); */
+	/* 		} */
+	/* 		break; */
+	/* } */
 
 	place_breakpoint_mismatch((uint32_t*) regs->mepc);
 }
