@@ -201,15 +201,11 @@ static void place_breakpoint(uint32_t* loc) {
 
 static void place_breakpoint_mismatch(uint32_t* loc) {
 	csr_write(CSR_TSELECT, 0);
-	unsigned mcontrol = 0b011100;
-	mcontrol = bits_set(mcontrol, 10, 7, 2);
-	csr_write(CSR_TDATA1, mcontrol);
-	csr_write(CSR_TDATA2, (uintptr_t) loc + 4);
+	csr_write(CSR_TDATA1, bits_set(0b011100, 10, 7, 2));
+	csr_write(CSR_TDATA2, (uintptr_t) loc + 2);
 
 	csr_write(CSR_TSELECT, 1);
-	mcontrol = 0b011100;
-	mcontrol = bits_set(mcontrol, 10, 7, 3);
-	csr_write(CSR_TDATA1, mcontrol);
+	csr_write(CSR_TDATA1, bits_set(0b011100, 10, 7, 3));
 	csr_write(CSR_TDATA2, (uintptr_t) loc);
 }
 
@@ -321,14 +317,15 @@ heap_t heap = (heap_t){
 	.active = true,
 };
 
-ht_t fence_ht;
+ht_t fence_ht[2];
 ht_t mem_ht;
 
 static void on_fence_i() {
 	if (OPT_SET(SS_IFENCE)) {
 		// clear all unflushed addresses
-		sbi_memset(&fence_ht.entries[0], 0, sizeof(ht_entry_t) * fence_ht.cap);
-		fence_ht.len = 0;
+		uintptr_t id = csr_read(CSR_MHARTID);
+		sbi_memset(&fence_ht[id].entries[0], 0, sizeof(ht_entry_t) * fence_ht[id].cap);
+		fence_ht[id].len = 0;
 	}
 }
 
@@ -416,7 +413,11 @@ static void on_store(char* addr, size_t sz, uint64_t stval) {
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
-		if (ht_put(&fence_ht, (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
+		if (ht_put(&fence_ht[0], (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
+			sbi_printf("ERROR: ifence checker ran out of memory\n");
+			sbi_hart_hang();
+		}
+		if (ht_put(&fence_ht[1], (uint64_t) epcpa((uintptr_t) addr), true) == -1) {
 			sbi_printf("ERROR: ifence checker ran out of memory\n");
 			sbi_hart_hang();
 		}
@@ -484,7 +485,8 @@ static void on_execute(char* va, char* addr, struct sbi_trap_regs* regs) {
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
-		if (ht_get(&fence_ht, (uint64_t) addr, NULL)) {
+		uintptr_t id = csr_read(CSR_MHARTID);
+		if (ht_get(&fence_ht[id], (uint64_t) addr, NULL)) {
 			sbi_printf("ERROR: attempt to execute unfenced instruction\n");
 			sbi_hart_hang();
 		}
@@ -587,14 +589,15 @@ void sbi_step_breakpoint(struct sbi_trap_regs* regs) {
 	place_breakpoint_mismatch((uint32_t*) regs->mepc);
 }
 
-static void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
+void sbi_ecall_step_enable_at(uintptr_t addr, unsigned flags) {
 	_sbi_step_enabled = 1;
 	_sbi_flags = flags;
 	// place breakpoint at EPC+4
 	place_breakpoint((uint32_t*) addr);
 
 	if (OPT_SET(SS_IFENCE)) {
-		if (ht_alloc(&fence_ht, 128) == -1) {
+		uintptr_t id = csr_read(CSR_MHARTID);
+		if (ht_alloc(&fence_ht[id], 128) == -1) {
 			sbi_printf("ERROR: could not allocate fence hashtable\n");
 			sbi_hart_hang();
 		}
@@ -615,7 +618,7 @@ static void sbi_ecall_step_disable(const struct sbi_trap_regs *regs) {
 	}
 
 	if (OPT_SET(SS_IFENCE)) {
-		ht_free(&fence_ht);
+		/* ht_free(&fence_ht[id]); */
 	}
 
 	if (OPT_SET(SS_REGION)) {

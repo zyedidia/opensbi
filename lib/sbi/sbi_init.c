@@ -26,6 +26,7 @@
 #include <sbi/sbi_timer.h>
 #include <sbi/sbi_tlb.h>
 #include <sbi/sbi_version.h>
+#include <sbi/sbi_step.h>
 
 #define BANNER                                              \
 	"   ____                    _____ ____ _____\n"     \
@@ -463,6 +464,8 @@ static atomic_t coldboot_lottery = ATOMIC_INITIALIZER(0);
  */
 void __noreturn sbi_init(struct sbi_scratch *scratch)
 {
+	sbi_ecall_step_enable_at(0x84000000, SS_IFENCE);
+
 	bool next_mode_supported	= FALSE;
 	bool coldboot			= FALSE;
 	u32 hartid			= current_hartid();
